@@ -1,6 +1,6 @@
 <p align="center">
-  <img width="350" src="assets/meilisearch-logo-light.svg?sanitize=true#gh-light-mode-only">
-  <img width="350" src="assets/meilisearch-logo-dark.svg?sanitize=true#gh-dark-mode-only">
+  <img src="assets/meilisearch-logo-light.svg?sanitize=true#gh-light-mode-only">
+  <img src="assets/meilisearch-logo-dark.svg?sanitize=true#gh-dark-mode-only">
 </p>
 
 <h4 align="center">
