@@ -19,7 +19,7 @@
   <a href="https://app.bors.tech/repositories/26457"><img src="https://bors.tech/images/badge_small.svg" alt="Bors enabled"></a>
 </p>
 
-<p align="center">⚡ An open-source, lightning-fast, and hyper-relevant search engine that fits effortlessly into your apps, websites, and workflow 🔍</p>
+<p align="center">⚡ A lightning-fast search engine that fits effortlessly into your apps, websites, and workflow 🔍</p>
 
 Meilisearch's mission is to help you shape a delightful search experience in a snap. To fulfill it, Meilisearch offers out-of-the-box features to speed up your workflow.
 
