@@ -4,6 +4,10 @@ First, thank you for contributing to Meilisearch! The goal of this document is t
 
 Remember that there are many ways to contribute other than writing code: writing [tutorials or blog posts](https://github.com/meilisearch/awesome-meilisearch), improving [the documentation](https://github.com/meilisearch/documentation), submitting [bug reports](https://github.com/meilisearch/meilisearch/issues/new?assignees=&labels=&template=bug_report.md&title=) and [feature requests](https://github.com/meilisearch/product/discussions/categories/feedback-feature-proposal)...
 
+The code in this repository is only concerned with managing multiple indexes, handling the update store, and exposing an HTTP API. Search and indexation are the domain of our core engine, [`milli`](https://github.com/meilisearch/milli), while tokenization is handled by [our `charabia` library](https://github.com/meilisearch/charabia/).
+
+If Meilisearch does not offer optimized support for your language, please consider contributing to `charabia` by following the [CONTRIBUTING.md file](https://github.com/meilisearch/charabia/blob/main/CONTRIBUTING.md) and integrating your intended normalizer/segmenter.
+
 ## Table of Contents
 
 - [Assumptions](#assumptions)
@@ -47,6 +51,23 @@ cargo test
 ```
 
 This command will be triggered to each PR as a requirement for merging it.
+
+#### Snapshot-based tests
+
+We are using [insta](https://insta.rs) to perform snapshot-based testing.
+We recommend using the insta tooling (such as `cargo-insta`) to update the snapshots if they change following a PR.
+
+New tests should use insta where possible rather than manual `assert` statements.
+
+Furthermore, we provide some macros on top of insta, notably a way to use snapshot hashes instead of inline snapshots, saving a lot of space in the repository.
+
+To effectively debug snapshot-based hashes, we recommend you export the `MEILI_TEST_FULL_SNAPS` environment variable so that snapshot are fully created locally:
+
+```
+export MEILI_TEST_FULL_SNAPS=true # add this to your .bashrc, .zshrc, ...
+```
+
+#### Test troubleshooting
 
 If you get a "Too many open files" error you might want to increase the open file limit using this command:
 
@@ -93,12 +114,20 @@ _[Read more about this](https://github.com/meilisearch/integration-guides/blob/m
 
 ### How to Publish a new Release
 
-The full Meilisearch release process is described in [this guide](https://github.com/meilisearch/core-team/blob/main/resources/meilisearch-release.md). Please follow it carefully before doing any release.
+The full Meilisearch release process is described in [this guide](https://github.com/meilisearch/engine-team/blob/main/resources/meilisearch-release.md). Please follow it carefully before doing any release.
+
+### How to publish a prototype
+
+Depending on the developed feature, you might need to provide a prototyped version of Meilisearch to make it easier to test by the users.
+
+This happens in two steps:
+- [Release the prototype](https://github.com/meilisearch/engine-team/blob/main/resources/prototypes.md#how-to-publish-a-prototype)
+- [Communicate about it](https://github.com/meilisearch/engine-team/blob/main/resources/prototypes.md#communication)
 
 ### Release assets
 
 For each release, the following assets are created:
-- Binaries for differents platforms (Linux, MacOS, Windows and ARM architectures) are attached to the GitHub release
+- Binaries for different platforms (Linux, MacOS, Windows and ARM architectures) are attached to the GitHub release
 - Binaries are pushed to HomeBrew and APT (not published for RC)
 - Docker tags are created/updated:
   - `vX.Y.Z`

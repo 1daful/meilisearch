@@ -1,33 +1,31 @@
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::convert::TryFrom;
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::fs::create_dir_all;
-use std::ops::Deref;
 use std::path::Path;
 use std::str;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use enum_iterator::IntoEnumIterator;
 use hmac::{Hmac, Mac};
-use meilisearch_types::star_or::StarOr;
-use milli::heed::types::{ByteSlice, DecodeIgnore, SerdeJson};
-use milli::heed::{Database, Env, EnvOpenOptions, RwTxn};
+use meilisearch_types::index_uid_pattern::IndexUidPattern;
+use meilisearch_types::keys::KeyId;
+use meilisearch_types::milli;
+use meilisearch_types::milli::heed::types::{ByteSlice, DecodeIgnore, SerdeJson};
+use meilisearch_types::milli::heed::{Database, Env, EnvOpenOptions, RwTxn};
 use sha2::Sha256;
 use time::OffsetDateTime;
 use uuid::fmt::Hyphenated;
 use uuid::Uuid;
 
-use super::error::Result;
+use super::error::{AuthControllerError, Result};
 use super::{Action, Key};
 
 const AUTH_STORE_SIZE: usize = 1_073_741_824; //1GiB
 const AUTH_DB_PATH: &str = "auth";
 const KEY_DB_NAME: &str = "api-keys";
 const KEY_ID_ACTION_INDEX_EXPIRATION_DB_NAME: &str = "keyid-action-index-expiration";
-
-pub type KeyId = Uuid;
 
 #[derive(Clone)]
 pub struct HeedAuthStore {
@@ -60,12 +58,19 @@ impl HeedAuthStore {
         let keys = env.create_database(Some(KEY_DB_NAME))?;
         let action_keyid_index_expiration =
             env.create_database(Some(KEY_ID_ACTION_INDEX_EXPIRATION_DB_NAME))?;
-        Ok(Self {
-            env,
-            keys,
-            action_keyid_index_expiration,
-            should_close_on_drop: true,
-        })
+        Ok(Self { env, keys, action_keyid_index_expiration, should_close_on_drop: true })
+    }
+
+    /// Return `Ok(())` if the auth store is able to access one of its database.
+    pub fn health(&self) -> Result<()> {
+        let rtxn = self.env.read_txn()?;
+        self.keys.first(&rtxn)?;
+        Ok(())
+    }
+
+    /// Return the size in bytes of database
+    pub fn size(&self) -> Result<u64> {
+        Ok(self.env.real_disk_size()?)
     }
 
     pub fn set_drop_on_close(&mut self, v: bool) {
@@ -92,15 +97,11 @@ impl HeedAuthStore {
         let mut actions = HashSet::new();
         for action in &key.actions {
             match action {
-                Action::All => actions.extend(Action::into_enum_iter()),
+                Action::All => actions.extend(enum_iterator::all::<Action>()),
                 Action::DocumentsAll => {
                     actions.extend(
-                        [
-                            Action::DocumentsGet,
-                            Action::DocumentsDelete,
-                            Action::DocumentsAdd,
-                        ]
-                        .iter(),
+                        [Action::DocumentsGet, Action::DocumentsDelete, Action::DocumentsAdd]
+                            .iter(),
                     );
                 }
                 Action::IndexesAll => {
@@ -110,6 +111,7 @@ impl HeedAuthStore {
                             Action::IndexesDelete,
                             Action::IndexesGet,
                             Action::IndexesUpdate,
+                            Action::IndexesSwap,
                         ]
                         .iter(),
                     );
@@ -121,10 +123,13 @@ impl HeedAuthStore {
                     actions.insert(Action::DumpsCreate);
                 }
                 Action::TasksAll => {
-                    actions.insert(Action::TasksGet);
+                    actions.extend([Action::TasksGet, Action::TasksDelete, Action::TasksCancel]);
                 }
                 Action::StatsAll => {
                     actions.insert(Action::StatsGet);
+                }
+                Action::MetricsAll => {
+                    actions.insert(Action::MetricsGet);
                 }
                 other => {
                     actions.insert(*other);
@@ -132,7 +137,7 @@ impl HeedAuthStore {
             }
         }
 
-        let no_index_restriction = key.indexes.contains(&StarOr::Star);
+        let no_index_restriction = key.indexes.iter().any(|p| p.matches_all());
         for action in actions {
             if no_index_restriction {
                 // If there is no index restriction we put None.
@@ -142,7 +147,7 @@ impl HeedAuthStore {
                 for index in key.indexes.iter() {
                     db.put(
                         &mut wtxn,
-                        &(&uid, &action, Some(index.deref().as_bytes())),
+                        &(&uid, &action, Some(index.to_string().as_bytes())),
                         &key.expires_at,
                     )?;
                 }
@@ -195,6 +200,13 @@ impl HeedAuthStore {
         Ok(existing)
     }
 
+    pub fn delete_all_keys(&self) -> Result<()> {
+        let mut wtxn = self.env.write_txn()?;
+        self.keys.clear(&mut wtxn)?;
+        wtxn.commit()?;
+        Ok(())
+    }
+
     pub fn list_api_keys(&self) -> Result<Vec<Key>> {
         let mut list = Vec::new();
         let rtxn = self.env.read_txn()?;
@@ -210,11 +222,28 @@ impl HeedAuthStore {
         &self,
         uid: Uuid,
         action: Action,
-        index: Option<&[u8]>,
+        index: Option<&str>,
     ) -> Result<Option<Option<OffsetDateTime>>> {
         let rtxn = self.env.read_txn()?;
-        let tuple = (&uid, &action, index);
-        Ok(self.action_keyid_index_expiration.get(&rtxn, &tuple)?)
+        let tuple = (&uid, &action, index.map(|s| s.as_bytes()));
+        match self.action_keyid_index_expiration.get(&rtxn, &tuple)? {
+            Some(expiration) => Ok(Some(expiration)),
+            None => {
+                let tuple = (&uid, &action, None);
+                for result in self.action_keyid_index_expiration.prefix_iter(&rtxn, &tuple)? {
+                    let ((_, _, index_uid_pattern), expiration) = result?;
+                    if let Some((pattern, index)) = index_uid_pattern.zip(index) {
+                        let index_uid_pattern = str::from_utf8(pattern)?;
+                        let pattern = IndexUidPattern::from_str(index_uid_pattern)
+                            .map_err(|e| AuthControllerError::Internal(Box::new(e)))?;
+                        if pattern.matches_str(index) {
+                            return Ok(Some(expiration));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+        }
     }
 
     pub fn prefix_first_expiration_date(

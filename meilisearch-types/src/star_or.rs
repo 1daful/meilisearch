@@ -1,13 +1,17 @@
+use std::fmt;
+use std::marker::PhantomData;
+use std::ops::ControlFlow;
+use std::str::FromStr;
+
+use deserr::{DeserializeError, Deserr, MergeWithError, ValueKind};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt::{Display, Formatter};
-use std::marker::PhantomData;
-use std::ops::Deref;
-use std::str::FromStr;
+
+use crate::deserr::query_params::FromQueryParameter;
 
 /// A type that tries to match either a star (*) or
 /// any other thing that implements `FromStr`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StarOr<T> {
     Star,
     Other(T),
@@ -24,23 +28,11 @@ impl<T: FromStr> FromStr for StarOr<T> {
         }
     }
 }
-
-impl<T: Deref<Target = str>> Deref for StarOr<T> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
+impl<T: fmt::Display> fmt::Display for StarOr<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Star => "*",
-            Self::Other(t) => t.deref(),
-        }
-    }
-}
-
-impl<T: Into<String>> From<StarOr<T>> for String {
-    fn from(s: StarOr<T>) -> Self {
-        match s {
-            StarOr::Star => "*".to_string(),
-            StarOr::Other(t) => t.into(),
+            StarOr::Star => write!(f, "*"),
+            StarOr::Other(x) => fmt::Display::fmt(x, f),
         }
     }
 }
@@ -60,7 +52,7 @@ impl<T: PartialEq + Eq> Eq for StarOr<T> {}
 impl<'de, T, E> Deserialize<'de> for StarOr<T>
 where
     T: FromStr<Err = E>,
-    E: Display,
+    E: fmt::Display,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -76,11 +68,11 @@ where
         impl<'de, T, FE> Visitor<'de> for StarOrVisitor<T>
         where
             T: FromStr<Err = FE>,
-            FE: Display,
+            FE: fmt::Display,
         {
             type Value = StarOr<T>;
 
-            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("a string")
             }
 
@@ -106,7 +98,7 @@ where
 
 impl<T> Serialize for StarOr<T>
 where
-    T: Deref<Target = str>,
+    T: ToString,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -114,15 +106,234 @@ where
     {
         match self {
             StarOr::Star => serializer.serialize_str("*"),
-            StarOr::Other(other) => serializer.serialize_str(other.deref()),
+            StarOr::Other(other) => serializer.serialize_str(&other.to_string()),
+        }
+    }
+}
+
+impl<T, E> Deserr<E> for StarOr<T>
+where
+    T: FromStr,
+    E: DeserializeError + MergeWithError<T::Err>,
+{
+    fn deserialize_from_value<V: deserr::IntoValue>(
+        value: deserr::Value<V>,
+        location: deserr::ValuePointerRef,
+    ) -> Result<Self, E> {
+        match value {
+            deserr::Value::String(v) => {
+                if v == "*" {
+                    Ok(StarOr::Star)
+                } else {
+                    match T::from_str(&v) {
+                        Ok(parsed) => Ok(StarOr::Other(parsed)),
+                        Err(e) => Err(deserr::take_cf_content(E::merge(None, e, location))),
+                    }
+                }
+            }
+            _ => Err(deserr::take_cf_content(E::error::<V>(
+                None,
+                deserr::ErrorKind::IncorrectValueKind {
+                    actual: value,
+                    accepted: &[ValueKind::String],
+                },
+                location,
+            ))),
+        }
+    }
+}
+
+/// A type representing the content of a query parameter that can either not exist,
+/// be equal to a star (*), or another value
+///
+/// It is a convenient alternative to `Option<StarOr<T>>`.
+#[derive(Debug, Default, Clone, Copy)]
+pub enum OptionStarOr<T> {
+    #[default]
+    None,
+    Star,
+    Other(T),
+}
+
+impl<T> OptionStarOr<T> {
+    pub fn is_some(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Star => false,
+            Self::Other(_) => true,
+        }
+    }
+    pub fn merge_star_and_none(self) -> Option<T> {
+        match self {
+            Self::None | Self::Star => None,
+            Self::Other(x) => Some(x),
+        }
+    }
+    pub fn try_map<U, E, F: Fn(T) -> Result<U, E>>(self, map_f: F) -> Result<OptionStarOr<U>, E> {
+        match self {
+            OptionStarOr::None => Ok(OptionStarOr::None),
+            OptionStarOr::Star => Ok(OptionStarOr::Star),
+            OptionStarOr::Other(x) => map_f(x).map(OptionStarOr::Other),
+        }
+    }
+}
+
+impl<T> FromQueryParameter for OptionStarOr<T>
+where
+    T: FromQueryParameter,
+{
+    type Err = T::Err;
+    fn from_query_param(p: &str) -> Result<Self, Self::Err> {
+        match p {
+            "*" => Ok(OptionStarOr::Star),
+            s => T::from_query_param(s).map(OptionStarOr::Other),
+        }
+    }
+}
+
+impl<T, E> Deserr<E> for OptionStarOr<T>
+where
+    E: DeserializeError + MergeWithError<T::Err>,
+    T: FromQueryParameter,
+{
+    fn deserialize_from_value<V: deserr::IntoValue>(
+        value: deserr::Value<V>,
+        location: deserr::ValuePointerRef,
+    ) -> Result<Self, E> {
+        match value {
+            deserr::Value::String(s) => match s.as_str() {
+                "*" => Ok(OptionStarOr::Star),
+                s => match T::from_query_param(s) {
+                    Ok(x) => Ok(OptionStarOr::Other(x)),
+                    Err(e) => Err(deserr::take_cf_content(E::merge(None, e, location))),
+                },
+            },
+            _ => Err(deserr::take_cf_content(E::error::<V>(
+                None,
+                deserr::ErrorKind::IncorrectValueKind {
+                    actual: value,
+                    accepted: &[ValueKind::String],
+                },
+                location,
+            ))),
+        }
+    }
+}
+
+/// A type representing the content of a query parameter that can either not exist, be equal to a star (*), or represent a list of other values
+#[derive(Debug, Default, Clone)]
+pub enum OptionStarOrList<T> {
+    #[default]
+    None,
+    Star,
+    List(Vec<T>),
+}
+
+impl<T> OptionStarOrList<T> {
+    pub fn is_some(&self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Star => false,
+            Self::List(_) => true,
+        }
+    }
+    pub fn map<U, F: Fn(T) -> U>(self, map_f: F) -> OptionStarOrList<U> {
+        match self {
+            Self::None => OptionStarOrList::None,
+            Self::Star => OptionStarOrList::Star,
+            Self::List(xs) => OptionStarOrList::List(xs.into_iter().map(map_f).collect()),
+        }
+    }
+    pub fn try_map<U, E, F: Fn(T) -> Result<U, E>>(
+        self,
+        map_f: F,
+    ) -> Result<OptionStarOrList<U>, E> {
+        match self {
+            Self::None => Ok(OptionStarOrList::None),
+            Self::Star => Ok(OptionStarOrList::Star),
+            Self::List(xs) => {
+                xs.into_iter().map(map_f).collect::<Result<Vec<_>, _>>().map(OptionStarOrList::List)
+            }
+        }
+    }
+    pub fn merge_star_and_none(self) -> Option<Vec<T>> {
+        match self {
+            Self::None | Self::Star => None,
+            Self::List(xs) => Some(xs),
+        }
+    }
+    pub fn push(&mut self, el: T) {
+        match self {
+            Self::None => *self = Self::List(vec![el]),
+            Self::Star => (),
+            Self::List(xs) => xs.push(el),
+        }
+    }
+}
+
+impl<T, E> Deserr<E> for OptionStarOrList<T>
+where
+    E: DeserializeError + MergeWithError<T::Err>,
+    T: FromQueryParameter,
+{
+    fn deserialize_from_value<V: deserr::IntoValue>(
+        value: deserr::Value<V>,
+        location: deserr::ValuePointerRef,
+    ) -> Result<Self, E> {
+        match value {
+            deserr::Value::String(s) => {
+                let mut error = None;
+                let mut is_star = false;
+                // CS::<String>::from_str is infaillible
+                let cs = serde_cs::vec::CS::<String>::from_str(&s).unwrap();
+                let len_cs = cs.0.len();
+                let mut els = vec![];
+                for (i, el_str) in cs.into_iter().enumerate() {
+                    if el_str == "*" {
+                        is_star = true;
+                    } else {
+                        match T::from_query_param(&el_str) {
+                            Ok(el) => {
+                                els.push(el);
+                            }
+                            Err(e) => {
+                                let location =
+                                    if len_cs > 1 { location.push_index(i) } else { location };
+                                error = match E::merge(error, e, location) {
+                                    ControlFlow::Continue(e) => Some(e),
+                                    ControlFlow::Break(e) => return Err(e),
+                                };
+                            }
+                        }
+                    }
+                }
+                if let Some(error) = error {
+                    return Err(error);
+                }
+
+                if is_star {
+                    Ok(OptionStarOrList::Star)
+                } else {
+                    Ok(OptionStarOrList::List(els))
+                }
+            }
+            _ => Err(deserr::take_cf_content(E::error::<V>(
+                None,
+                deserr::ErrorKind::IncorrectValueKind {
+                    actual: value,
+                    accepted: &[ValueKind::String],
+                },
+                location,
+            ))),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::{json, Value};
+
+    use super::*;
 
     #[test]
     fn star_or_serde_roundtrip() {

@@ -25,11 +25,7 @@ const SPLIT_SYMBOL: char = '.';
 /// ```
 fn contained_in(selector: &str, key: &str) -> bool {
     selector.starts_with(key)
-        && selector[key.len()..]
-            .chars()
-            .next()
-            .map(|c| c == SPLIT_SYMBOL)
-            .unwrap_or(true)
+        && selector[key.len()..].chars().next().map(|c| c == SPLIT_SYMBOL).unwrap_or(true)
 }
 
 /// Map the selected leaf values of a json allowing you to update only the fields that were selected.
@@ -49,7 +45,7 @@ fn contained_in(selector: &str, key: &str) -> bool {
 /// map_leaf_values(
 ///     value.as_object_mut().unwrap(),
 ///     ["jean.race.name"],
-///     |key, value| match (value, dbg!(key)) {
+///     |key, value| match (value, key) {
 ///         (Value::String(name), "jean.race.name") => *name = "patou".to_string(),
 ///         _ => unreachable!(),
 ///     },
@@ -76,9 +72,9 @@ pub fn map_leaf_values<'a>(
     map_leaf_values_in_object(value, &selectors, "", &mut mapper);
 }
 
-pub fn map_leaf_values_in_object<'a>(
+pub fn map_leaf_values_in_object(
     value: &mut Map<String, Value>,
-    selectors: &[&'a str],
+    selectors: &[&str],
     base_key: &str,
     mapper: &mut impl FnMut(&str, &mut Value),
 ) {
@@ -244,10 +240,7 @@ mod tests {
     fn test_contained_in() {
         assert!(contained_in("animaux", "animaux"));
         assert!(contained_in("animaux.chien", "animaux"));
-        assert!(contained_in(
-            "animaux.chien.race.bouvier bernois.fourrure.couleur",
-            "animaux"
-        ));
+        assert!(contained_in("animaux.chien.race.bouvier bernois.fourrure.couleur", "animaux"));
         assert!(contained_in(
             "animaux.chien.race.bouvier bernois.fourrure.couleur",
             "animaux.chien"
@@ -726,14 +719,12 @@ mod tests {
             }
         });
 
-        map_leaf_values(
-            value.as_object_mut().unwrap(),
-            ["jean.race.name"],
-            |key, value| match (value, dbg!(key)) {
+        map_leaf_values(value.as_object_mut().unwrap(), ["jean.race.name"], |key, value| {
+            match (value, key) {
                 (Value::String(name), "jean.race.name") => *name = S("patou"),
                 _ => unreachable!(),
-            },
-        );
+            }
+        });
 
         assert_eq!(
             value,
